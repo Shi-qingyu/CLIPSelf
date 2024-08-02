@@ -4,6 +4,8 @@ import os
 import re
 import subprocess
 import sys
+sys.path.append("src")
+
 import random
 from datetime import datetime
 from training.region_clip import RegionCLIP
@@ -65,6 +67,7 @@ def main(args):
 
     # fully initialize distributed device environment
     device = init_distributed_device(args)
+    print(f"device: {device}")
 
     # get the name of the experiments
     if args.name is None:

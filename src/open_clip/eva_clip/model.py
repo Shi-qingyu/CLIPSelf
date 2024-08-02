@@ -151,7 +151,8 @@ def _build_vision_tower(
         )
     else:
         vision_heads = vision_cfg.width // vision_cfg.head_width
-        norm_layer = LayerNormFp32 if cast_dtype in (torch.float16, torch.bfloat16) else LayerNorm
+        norm_layer = LayerNorm
+        # norm_layer = LayerNormFp32 if cast_dtype in (torch.float16, torch.bfloat16) else LayerNorm
         visual = VisionTransformer(
             image_size=vision_cfg.image_size,
             patch_size=vision_cfg.patch_size,

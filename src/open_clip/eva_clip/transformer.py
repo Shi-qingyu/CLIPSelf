@@ -1,5 +1,6 @@
 import os
 import logging
+from functools import partial
 from collections import OrderedDict
 import math
 from typing import Callable, Optional, Sequence
@@ -7,6 +8,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torchvision.ops import roi_align
 
 try:
     from timm.models.layers import trunc_normal_
@@ -236,6 +238,16 @@ class Attention(nn.Module):
             x = x.view(N, self.num_heads, L, C) * self.head_scale
             x = x.view(-1, L, C)
         x = x.transpose(0, 1).reshape(L, N, C)
+        x = self.out_proj(x)
+        x = self.out_drop(x)
+        return x
+    
+    def proj_without_attn(self, x, attn_mask=None):
+        weight = self.in_proj_weight.data
+        bias = self.in_proj_bias.data
+        v_proj_weight = torch.chunk(weight, 3, dim=0)[-1]
+        v_bias = torch.chunk(bias, 3, dim=0)[-1]
+        x = F.linear(input=x, weight=v_proj_weight, bias=v_bias)
         x = self.out_proj(x)
         x = self.out_drop(x)
         return x
@@ -481,6 +493,12 @@ class ResidualAttentionBlock(nn.Module):
         x = x + self.ls_1(self.attention(self.ln_1(x), attn_mask=attn_mask))
         x = x + self.ls_2(self.mlp(self.ln_2(x)))
         return x
+    
+    def forward_without_attn(self, x, attn_mask=None):
+        x = x + self.ls_1(self.attn.proj_without_attn(self.ln_1(x), attn_mask=attn_mask))
+        x = x + self.ls_2(self.mlp(self.ln_2(x)))
+        return x
+        
 
 class Transformer(nn.Module):
     def __init__(
@@ -515,6 +533,15 @@ class Transformer(nn.Module):
             else:
                 x = r(x, attn_mask=attn_mask)
         return x
+    
+    def forward_without_last_block(self, x, attn_mask=None):
+        for r in self.resblocks[:-1]:
+            x = r(x, attn_mask=attn_mask)
+        return x
+    
+    def forward_without_attn(self, x, attn_mask=None):
+        x = self.resblocks[-1].forward_without_attn(x)[1:]
+        return x
 
 
 class VisionTransformer(nn.Module):
@@ -532,7 +559,7 @@ class VisionTransformer(nn.Module):
             output_dim: int = 512,
             act_layer: Callable = nn.GELU,
             norm_layer: Callable = LayerNorm,
-            xattn: bool = False,
+            xattn: bool = True,
     ):
         super().__init__()
         self.image_size = to_2tuple(image_size)
@@ -637,6 +664,124 @@ class VisionTransformer(nn.Module):
                 x = x @ self.proj
 
         return x
+
+    def encode_dense(self, x, keep_shape=True):
+        bs, _, h, w = x.shape
+        h = h // self.conv1.stride[0]
+        w = w // self.conv1.stride[1]
+        x = self.conv1(x).permute(0, 2, 3, 1).flatten(1, 2)
+        batch_size, seq_len, _ = x.size()
+
+        cls_tokens = self.class_embedding[None, None].expand(batch_size, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        x = torch.cat((cls_tokens, x), dim=1)
+        if self.positional_embedding is not None:
+            x = x + self.rescale_positional_embedding(out_size=(h, w)).to(x.dtype)
+
+        x = self.ln_pre(x)
+        
+        x = x.permute(1, 0, 2)
+        x = self.transformer.forward_without_last_block(x=x)
+        x = self.transformer.forward_without_attn(x)    # (L, B, C)
+        x = x.permute(1, 0, 2)  # (B, L, C)
+
+        x = self.ln_post(x)
+
+        if self.proj is not None:
+            x = x @ self.proj
+
+        x = F.normalize(x, dim=-1)   # normalize along last dimension
+        if keep_shape:
+            x = x.view(bs, h, w, -1).permute(0, 3, 1, 2)
+        return x
+
+    def extract_roi_features(self, x, normed_boxes, **kwargs):
+        x = self.encode_dense(x, keep_shape=True)
+
+        return roi_align(x, self._denormalize_boxes(normed_boxes, x), (1, 1),
+                         1.0, -1, True)[..., 0, 0]
+
+    def rescale_positional_embedding(self, out_size):
+        h, w = out_size
+        patch_shape = (self.image_size[0] // self.conv1.stride[0], self.image_size[1] // self.conv1.stride[1])
+        if (h, w) == patch_shape:
+            return self.positional_embedding
+        rescaled_positional_embedding = \
+            self.positional_embedding.new_zeros(1, 1 + h * w, self.positional_embedding.shape[-1])
+        rescaled_positional_embedding[0, 0] = self.positional_embedding[0]
+        pe_2d = self.positional_embedding[1:].T.contiguous().view(
+            1, -1, *patch_shape)
+        pe_2d = F.interpolate(pe_2d, out_size, mode='bicubic', align_corners=False).view(-1, h * w)
+        rescaled_positional_embedding[0, 1:] = pe_2d.T.contiguous()
+
+        return rescaled_positional_embedding
+
+    def mask_pool(self, x, masks):
+        feature_map = self.encode_dense(x, keep_shape=False)
+        num_masks_per_image = [len(masks_per_image) for masks_per_image in masks]
+        masks = torch.cat(masks).float().flatten(-2, -1)    # bs, h*w
+        feature_map = torch.repeat_interleave(
+            feature_map, torch.tensor(num_masks_per_image, device=feature_map.device), dim=0)
+        features = (feature_map * masks.unsqueeze(-1)).sum(1) / (masks.sum(1, keepdim=True) + 1e-12)
+
+        return features
+
+    @staticmethod
+    def _denormalize_boxes(normed_boxes, x):
+        h, w = x.shape[-2:]
+        denormed_boxes = []
+        for boxes in normed_boxes:
+            new_boxes = boxes.clone()   # FIXME: do not change the value in normed_boxes!
+            new_boxes[:, [0, 2]] *= w
+            new_boxes[:, [1, 3]] *= h
+            denormed_boxes.append(new_boxes)
+        return denormed_boxes
+
+    def encode_rois_and_image(self, x, normed_boxes):
+        bs, _, h, w = x.shape
+        h = h // self.patch_embed.patch_size[0]
+        w = w // self.patch_embed.patch_size[1]
+        x = self.patch_embed(x)
+        batch_size, seq_len, _ = x.size()
+
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        x = torch.cat((cls_tokens, x), dim=1)
+        if self.pos_embed is not None:
+            x = x + self.rescale_positional_embedding(out_size=(h, w))
+        x = self.pos_drop(x)
+
+        # a patch_dropout of 0. would mean it is disabled and this function would do nothing but return what was passed in
+        if os.getenv('RoPE') == '1':
+            if self.training and not isinstance(self.patch_dropout, nn.Identity):
+                x, patch_indices_keep = self.patch_dropout(x)
+                self.rope.forward = partial(self.rope.forward, patch_indices_keep=patch_indices_keep)
+            else:
+                self.rope.forward = partial(self.rope.forward, patch_indices_keep=None)
+                x = self.patch_dropout(x)
+        else:
+            x = self.patch_dropout(x)
+
+        rel_pos_bias = self.rel_pos_bias() if self.rel_pos_bias is not None else None
+        for blk in self.blocks[:-1]:
+            x = blk(x, rel_pos_bias=rel_pos_bias)
+        x_image = self.head(
+            self.post_attention(
+                self.blocks[-1](
+                    x, rel_pos_bias=rel_pos_bias)
+            )
+        )
+        x_image = F.normalize(x_image, dim=-1)
+
+        x = self.blocks[-1].forward_without_attn(x)[:, 1:]
+        x = self.norm(x)
+        x = self.head(x)
+        assert self.fc_norm is None
+        x = F.normalize(x, dim=-1)   # normalize along last dimension
+        x = x.view(bs, h, w, -1).permute(0, 3, 1, 2)
+        x_rois = roi_align(x, self._denormalize_boxes(normed_boxes, x),
+                           (1, 1), 1.0, -1, True)[..., 0, 0]
+        x_rois = F.normalize(x_rois, dim=-1)
+
+        return x_rois, x_image
 
 
 class TextTransformer(nn.Module):

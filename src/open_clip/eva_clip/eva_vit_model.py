@@ -248,7 +248,7 @@ class Attention(nn.Module):
 
     def proj_without_attn(self, x):
         x = F.linear(input=x, weight=self.v_proj.weight, bias=self.v_bias)
-        # B, num_heads, C
+        # B, seq_len, C
         x = self.inner_attn_ln(x)
         x = self.proj(x)
         x = self.proj_drop(x)

@@ -140,11 +140,13 @@ def create_model(
         pretrained_cfg = {}
         model_cfg = None
 
+    checkpoint_path = cache_dir if cache_dir is not None else checkpoint_path
     if isinstance(device, str):
         device = torch.device(device)
     if pretrained == 'eva':
         return eva_clip.create_model(model_name=model_name,
-                                     pretrained=cache_dir, force_custom_clip=True,
+                                     pretrained=checkpoint_path, 
+                                     force_custom_clip=True,
                                      precision=precision,
                                      device=device,)
     if pretrained and pretrained.lower() == 'openai':

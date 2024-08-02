@@ -180,7 +180,7 @@ _PRETRAINED = {
     "EVA01-CLIP-g-14": _EVAg14,
     "EVA01-CLIP-g-14-plus": _EVAg14_PLUS,
 
-    # "ViT-bigG-14": _VITbigG14,
+    "ViT-bigG-14": _VITbigG14,
     "OpenCLIP-bigG-14": _VITbigG14,
 
     "EVA02-CLIP-bigE-14": _EVAbigE14,
