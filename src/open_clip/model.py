@@ -212,6 +212,8 @@ class CLIP(nn.Module):
         self.register_buffer('attn_mask', text.attn_mask, persistent=False)
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        
+        self.lock_image_tower(unlocked_groups=1)               
 
     def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=False, **kwargs):
         self.visual.lock(unlocked_groups=unlocked_groups, freeze_bn_stats=freeze_bn_stats)

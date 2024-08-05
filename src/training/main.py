@@ -269,7 +269,7 @@ def main(args):
         del dist_model
         evaluate(model, data, start_epoch, args)
         return
-    evaluate(model, data, start_epoch, args)
+    # evaluate(model, data, start_epoch, args)
 
     loss = None
 

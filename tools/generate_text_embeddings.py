@@ -177,7 +177,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_version', default='ViT-L-14-336')
     parser.add_argument('--ann', default='data/coco/annotations/panoptic_val2017.json')
     parser.add_argument('--out_path', default='metadata/coco_panoptic_clip_hand_craft_ViTL14x336.npy')
-    parser.add_argument('--pretrained', default='openai')
+    parser.add_argument('--pretrained', default='checkpoints/open_clip_pytorch_model.bin')
     parser.add_argument('--cache_dir', default='checkpoints')
 
     args = parser.parse_args()

@@ -288,6 +288,13 @@ class CustomCLIP(nn.Module):
         for param in self.text.parameters():
             param.requires_grad = False
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        
+        # for param in self.visual.parameters():
+        #     param.requires_grad = False
+        # for module in self.visual.transformer.resblocks[-6:]:
+        #     for param in module.parameters():
+        #         param.requires_grad = True
+            
 
     def train(self, mode=True):
         super().train(mode)
